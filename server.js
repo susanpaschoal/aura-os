@@ -9,14 +9,20 @@ const app = express();
 // --- CONFIGURAÇÃO DO BANCO DE DADOS (POSTGRESQL) ---
 const sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
+    protocol: 'postgres',
     dialectOptions: {
         ssl: {
             require: true,
             rejectUnauthorized: false
         }
     },
-    logging: false
+    logging: console.log // Isso vai mostrar os erros no log do Render
 });
+
+// Teste de conexão imediato
+sequelize.authenticate()
+    .then(() => console.log('✅ CONECTADO AO NEON COM SUCESSO!'))
+    .catch(err => console.error('❌ ERRO AO CONECTAR NO NEON:', err));
 
 // --- MODELOS (TABELAS) ---
 const Empresa = sequelize.define('Empresa', {
@@ -53,12 +59,12 @@ app.use(express.urlencoded({ extended: true }));
 app.use(session({
     store: new pgSession({
         conString: process.env.DATABASE_URL,
-        tableName: 'session' // O connect-pg-simple criará esta tabela automaticamente
+        createTableIfMissing: true, // ESSENCIAL: Cria a tabela 'session' no Neon automaticamente
     }),
     secret: 'aura-quantum-2026',
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 } // 30 dias
+    cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 }
 }));
 
 const auth = (req, res, next) => {
