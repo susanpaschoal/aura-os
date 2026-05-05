@@ -6,7 +6,10 @@ require('dotenv').config();
 
 const app = express();
 
-// --- CONEXÃO NEON (POSTGRESQL) ---
+// --- CONFIGURAÇÃO PARA O RENDER ---
+app.set('trust proxy', 1);
+
+// --- CONEXÃO NEON (DATABASE_URL deve estar no Render) ---
 const sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
     dialectOptions: {
@@ -18,17 +21,17 @@ const sequelize = new Sequelize(process.env.DATABASE_URL, {
     logging: false
 });
 
-// --- MODELOS DE DADOS ---
+// --- MODELOS ---
 const Empresa = sequelize.define('Empresa', { dominio: { type: DataTypes.STRING, unique: true } });
 const Usuario = sequelize.define('Usuario', {
     nome: DataTypes.STRING,
     login: { type: DataTypes.STRING, unique: true },
     senha: DataTypes.STRING,
-    assinatura_ativa: { type: DataTypes.INTEGER, defaultValue: 1 } // Ativo por padrão
+    assinatura_ativa: { type: DataTypes.INTEGER, defaultValue: 1 }
 });
 const Estoque = sequelize.define('Estoque', {
     nome: DataTypes.STRING,
-    tipo: DataTypes.STRING, // 'Alugado' (Ativo) ou 'Comprado' (Consumível)
+    tipo: DataTypes.STRING, // 'Alugado' ou 'Comprado'
     codigo_identificador: DataTypes.STRING,
     quantidade: { type: DataTypes.INTEGER, defaultValue: 0 },
     status: { type: DataTypes.STRING, defaultValue: 'Disponível' }
@@ -39,10 +42,10 @@ Usuario.belongsTo(Empresa);
 Empresa.hasMany(Estoque);
 Estoque.belongsTo(Empresa);
 
-// Sincronização automática com o Neon
-sequelize.sync({ alter: true });
+// Sincronização Automática com o Neon
+sequelize.sync({ alter: true }).then(() => console.log("✅ Banco Neon Sincronizado"));
 
-// --- MIDDLEWARES E SESSÃO ---
+// --- MIDDLEWARES ---
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
@@ -53,7 +56,11 @@ app.use(session({
     secret: 'aura-quantum-enterprise-2026',
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, secure: false }
+    cookie: { 
+        maxAge: 30 * 24 * 60 * 60 * 1000, 
+        secure: true, 
+        sameSite: 'none' 
+    }
 }));
 
 const auth = (req, res, next) => {
@@ -64,28 +71,24 @@ const auth = (req, res, next) => {
 // --- ROTAS DA API ---
 
 app.get('/api/dados', auth, async (req, res) => {
-    try {
-        const dados = await Estoque.findAll({ 
-            where: { EmpresaId: req.session.user.EmpresaId },
-            order: [['createdAt', 'DESC']]
-        });
-        res.json(dados);
-    } catch (err) { res.status(500).json(err); }
+    const dados = await Estoque.findAll({ 
+        where: { EmpresaId: req.session.user.EmpresaId },
+        order: [['createdAt', 'DESC']]
+    });
+    res.json(dados);
 });
 
 app.post('/api/estoque/add', auth, async (req, res) => {
     const { nome, tipo, codigo, qtd } = req.body;
-    try {
-        const [item, created] = await Estoque.findOrCreate({
-            where: { codigo_identificador: codigo, EmpresaId: req.session.user.EmpresaId },
-            defaults: { nome, tipo, quantidade: parseInt(qtd) || 0 }
-        });
-        if (!created) {
-            item.quantidade += parseInt(qtd) || 0;
-            await item.save();
-        }
-        res.json({ ok: true });
-    } catch (err) { res.status(500).json(err); }
+    const [item, created] = await Estoque.findOrCreate({
+        where: { codigo_identificador: codigo, EmpresaId: req.session.user.EmpresaId },
+        defaults: { nome, tipo, quantidade: parseInt(qtd) || 0 }
+    });
+    if (!created) {
+        item.quantidade += parseInt(qtd) || 0;
+        await item.save();
+    }
+    res.json({ ok: true });
 });
 
 app.post('/api/estoque/status', auth, async (req, res) => {
@@ -114,19 +117,19 @@ app.post('/api/login', async (req, res) => {
         req.session.user = user;
         req.session.save(() => res.redirect('/'));
     } else {
-        res.send('<script>alert("Falha no login"); window.location="/login";</script>');
+        res.send('<script>alert("Login inválido"); window.location="/login";</script>');
     }
 });
 
 app.post('/api/cadastro', async (req, res) => {
     const { nome, login, senha } = req.body;
-    const dominio = login.split('@')[1] || 'comum';
+    const dominio = login.split('@')[1] || 'geral';
     const [empresa] = await Empresa.findOrCreate({ where: { dominio } });
     await Usuario.create({ nome, login, senha, EmpresaId: empresa.id });
     res.redirect('/login');
 });
 
-// --- INTERFACE (UI ÚNICA) ---
+// --- INTERFACE ---
 const ui_header = `
 <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
@@ -140,8 +143,8 @@ const ui_header = `
     .stat-card { background: var(--card); padding: 25px; border-radius: 16px; border: 1px solid #1e293b; }
     .table-container { background: var(--card); border-radius: 16px; padding: 20px; border: 1px solid #1e293b; }
     table { width: 100%; border-collapse: collapse; }
-    th { text-align:left; color: var(--sub); padding: 12px; border-bottom: 1px solid #1e293b; font-size: 13px; }
-    td { padding: 12px; border-bottom: 1px solid #111827; font-size: 14px; }
+    th { text-align:left; color: var(--sub); padding: 12px; border-bottom: 1px solid #1e293b; }
+    td { padding: 12px; border-bottom: 1px solid #111827; }
     .btn-main { background: var(--accent); color: black; font-weight: bold; padding: 10px 20px; border:none; border-radius:8px; cursor:pointer; }
     .btn-outline { background:none; border:1px solid #1e293b; color:white; padding:5px 10px; border-radius:5px; cursor:pointer; }
     input, select { background: #111827; border: 1px solid #1e293b; color: white; padding: 10px; border-radius: 8px; margin: 5px 0; }
@@ -156,15 +159,14 @@ app.get('/login', (req, res) => {
             <form action="/api/login" method="POST">
                 <input name="login" placeholder="E-mail" style="width:93%" required>
                 <input name="senha" type="password" placeholder="Senha" style="width:93%" required>
-                <button class="btn-main" style="width:100%; margin-top:15px">ENTRAR NO SISTEMA</button>
+                <button class="btn-main" style="width:100%; margin-top:10px">ENTRAR</button>
             </form>
-            <hr style="border:0; border-top:1px solid #1e293b; margin:20px 0">
+            <p style="text-align:center; font-size:12px; color:var(--sub); margin-top:15px">Novo? Use o formulário abaixo:</p>
             <form action="/api/cadastro" method="POST">
-                <p style="font-size:12px; color:var(--sub)">Novo aqui? Registre sua empresa:</p>
-                <input name="nome" placeholder="Seu Nome" style="width:93%">
-                <input name="login" placeholder="E-mail Profissional" style="width:93%">
+                <input name="nome" placeholder="Nome" style="width:93%">
+                <input name="login" placeholder="E-mail" style="width:93%">
                 <input name="senha" type="password" placeholder="Senha" style="width:93%">
-                <button class="btn-outline" style="width:100%">CRIAR CONTA</button>
+                <button class="btn-outline" style="width:100%">CADASTRAR EMPRESA</button>
             </form>
         </div>
     </div>`);
@@ -186,9 +188,11 @@ app.get('/', auth, (req, res) => {
         async function refresh() {
             const res = await fetch('/api/dados');
             currentData = await res.json();
-            const active = document.querySelector('.nav-btn.active').innerText;
-            if(active.includes('Dashboard')) renderDash();
-            else if(active.includes('Inventário')) renderEquip();
+            const activeEl = document.querySelector('.nav-btn.active');
+            const activeText = activeEl ? activeEl.innerText : 'Dashboard';
+            
+            if(activeText.includes('Dashboard')) renderDash();
+            else if(activeText.includes('Inventário')) renderEquip();
             else renderManu();
         }
 
@@ -200,7 +204,7 @@ app.get('/', auth, (req, res) => {
 
         function renderDash() {
             const alug = currentData.filter(i => i.tipo === 'Alugado').length;
-            const comp = currentData.filter(i => i.tipo === 'Comprado').reduce((a,b)=> a + b.quantidade, 0);
+            const comp = currentData.filter(i => i.tipo === 'Comprado').reduce((a,b)=> a + (parseInt(b.quantidade) || 0), 0);
             const manu = currentData.filter(i => i.status === 'Manutenção').length;
             
             document.getElementById('view').innerHTML = \`
@@ -226,7 +230,7 @@ app.get('/', auth, (req, res) => {
                     <input id="n" placeholder="Nome do Item">
                     <select id="t"><option value="Comprado">Estoque (Consumível)</option><option value="Alugado">Ativo (Patrimônio)</option></select>
                     <input id="c" placeholder="Código/Patrimônio">
-                    <input id="q" type="number" placeholder="Qtd" style="width:60px">
+                    <input id="q" type="number" placeholder="Qtd" style="width:80px">
                     <button class="btn-main" onclick="add()">CADASTRAR</button>
                 </div>
                 <div class="table-container">
@@ -235,7 +239,7 @@ app.get('/', auth, (req, res) => {
                         \${currentData.map(i => \`<tr>
                             <td>\${i.codigo_identificador}</td><td>\${i.nome}</td><td>\${i.tipo}</td>
                             <td>\${i.tipo === 'Comprado' ? i.quantidade + ' un' : i.status}</td>
-                            <td>\${i.tipo === 'Comprado' ? \`<button class="btn-outline" onclick="out('\${i.id}')">Saída</button>\` : '-'}</td>
+                            <td>\${i.tipo === 'Comprado' ? \\\`<button class="btn-outline" onclick="out('\${i.id}')">Saída</button>\\\` : '-'}</td>
                         </tr>\`).join('')}
                     </table>
                 </div>\`;
@@ -284,4 +288,4 @@ app.get('/', auth, (req, res) => {
 app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login'); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Aura Enterprise Ativa'));
+app.listen(PORT, () => console.log('Aura Enterprise Online'));
