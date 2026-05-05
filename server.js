@@ -1,3 +1,78 @@
+require('dotenv').config();
+const express = require('express');
+const { Sequelize, DataTypes } = require('sequelize');
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+
+const app = express();
+
+// --- CONFIGURAÇÃO PARA O RENDER ---
+app.set('trust proxy', 1);
+
+// --- CONEXÃO NEON ---
+const sequelize = new Sequelize(process.env.DATABASE_URL, {
+    dialect: 'postgres',
+    dialectOptions: {
+        ssl: {
+            require: true,
+            rejectUnauthorized: false
+        }
+    },
+    logging: false
+});
+
+// --- MODELOS ---
+const Empresa = sequelize.define('Empresa', { dominio: { type: DataTypes.STRING, unique: true } });
+
+const Usuario = sequelize.define('Usuario', {
+    nome: DataTypes.STRING,
+    login: { type: DataTypes.STRING, unique: true },
+    senha: DataTypes.STRING,
+    assinatura_ativa: { type: DataTypes.INTEGER, defaultValue: 1 }
+});
+
+const Estoque = sequelize.define('Estoque', {
+    nome: DataTypes.STRING,
+    tipo: DataTypes.STRING,
+    codigo_identificador: DataTypes.STRING,
+    quantidade: { type: DataTypes.INTEGER, defaultValue: 0 },
+    status: { type: DataTypes.STRING, defaultValue: 'Disponível' }
+});
+
+Empresa.hasMany(Usuario);
+Usuario.belongsTo(Empresa);
+Empresa.hasMany(Estoque);
+Estoque.belongsTo(Empresa);
+
+// 🔒 MAIS SEGURO PRA PRODUÇÃO
+sequelize.sync().then(() => console.log("✅ Banco Neon conectado"));
+
+// --- MIDDLEWARES ---
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+const isProd = process.env.NODE_ENV === 'production';
+
+app.use(session({
+    store: new pgSession({
+        conString: process.env.DATABASE_URL,
+        createTableIfMissing: true
+    }),
+    secret: 'aura-quantum-enterprise-2026',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { 
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        secure: isProd,
+        sameSite: isProd ? 'none' : 'lax'
+    }
+}));
+
+const auth = (req, res, next) => {
+    if (!req.session.user) return res.redirect('/login');
+    next();
+};
+
 // --- ROTAS DA API ---
 
 app.get('/api/dados', auth, async (req, res) => {
