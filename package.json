@@ -1,10 +1,19 @@
-"dependencies": {
-  "bcryptjs": "^2.4.3",
-  "cors": "^2.8.5",
-  "dotenv": "^16.4.5",
-  "express": "^4.19.2",
-  "jsonwebtoken": "^9.0.2",
-  "pg": "^8.11.5",
-  "pg-hstore": "^2.3.4",
-  "sequelize": "^6.37.3"
+{
+  "name": "aura-os",
+  "version": "1.0.0",
+  "description": "Sistema de Controle de Estoque e Manutenção",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.3"
+  }
 }
