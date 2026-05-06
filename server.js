@@ -1,139 +1,85 @@
 require('dotenv').config();
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
-const session = require('express-session');
-const app = express();
+const cors = require('cors');
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (NEON / POSTGRESQL) ---
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// --- CONFIGURAÇÃO DO BANCO (Neon PostgreSQL) ---
 const sequelize = new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: {
-        ssl: {
-            require: true,
-            rejectUnauthorized: false
-        }
-    },
+    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
     logging: false
 });
 
 // --- MODELOS ---
-const Empresa = sequelize.define('Empresa', {
-    dominio: { type: DataTypes.STRING, unique: true }
-}, { tableName: 'empresas', timestamps: false });
-
-const Usuario = sequelize.define('Usuario', {
-    nome: { type: DataTypes.STRING },
-    login: { type: DataTypes.STRING, unique: true },
-    senha: { type: DataTypes.STRING },
-    assinatura_ativa: { type: DataTypes.INTEGER, defaultValue: 0 },
-    empresa_id: { type: DataTypes.INTEGER }
-}, { tableName: 'usuarios', timestamps: false });
-
-const Estoque = sequelize.define('Estoque', {
-    nome: { type: DataTypes.STRING },
-    tipo: { type: DataTypes.STRING },
-    codigo_identificador: { type: DataTypes.STRING },
+const Produto = sequelize.define('Produto', {
+    codigo: { type: DataTypes.STRING, unique: true, allowNull: false },
+    nome: { type: DataTypes.STRING, allowNull: false },
     quantidade: { type: DataTypes.INTEGER, defaultValue: 0 },
-    status: { type: DataTypes.STRING, defaultValue: 'Disponível' },
-    empresa_id: { type: DataTypes.INTEGER }
-}, { tableName: 'estoque', timestamps: false });
-
-// --- MIDDLEWARES ---
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(session({ 
-    secret: 'aura-quantum-2026', 
-    resave: false, 
-    saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 24 } 
-}));
-
-const auth = (req, res, next) => {
-    if (!req.session.user) return res.redirect('/login');
-    if (req.session.user.assinatura_ativa === 0 && req.url !== '/assinatura' && req.url !== '/api/assinar') return res.redirect('/assinatura');
-    next();
-};
-
-// --- API ROUTES ---
-app.get('/api/dados', auth, async (req, res) => {
-    const itens = await Estoque.findAll({ where: { empresa_id: req.session.user.empresa_id } });
-    res.json(itens);
+    tipo: { type: DataTypes.STRING, defaultValue: 'Comprado' }, // 'Alugado' ou 'Comprado'
+    status: { type: DataTypes.STRING, defaultValue: 'Disponível' } // 'Disponível' ou 'Manutenção'
 });
 
-app.post('/api/login', async (req, res) => {
-    const { login, senha } = req.body;
-    const user = await Usuario.findOne({ where: { login, senha } });
-    if (user) { 
-        req.session.user = user.toJSON(); 
-        res.redirect('/'); 
-    } else {
-        res.send('<script>alert("Acesso Negado"); window.location="/login";</script>');
-    }
+const Movimentacao = sequelize.define('Movimentacao', {
+    item_nome: { type: DataTypes.STRING },
+    quantidade: { type: DataTypes.INTEGER },
+    equipe: { type: DataTypes.STRING },
+    responsavel: { type: DataTypes.STRING },
+    data: { type: DataTypes.DATE, defaultValue: Sequelize.NOW }
 });
 
-app.post('/api/cadastro', async (req, res) => {
-    const { nome, login, senha } = req.body;
-    const dominio = login.split('@')[1] || 'geral';
-    const [empresa] = await Empresa.findOrCreate({ where: { dominio } });
-    await Usuario.create({ nome, login, senha, empresa_id: empresa.id });
-    res.redirect('/login');
-});
+// --- ROTAS DA API ---
 
-app.post('/api/estoque/add', auth, async (req, res) => {
-    const { nome, tipo, codigo, qtd } = req.body;
-    const empresa_id = req.session.user.empresa_id;
-    const quantidadeAdicional = parseInt(qtd) || 0;
-
+// 1. Busca todos os dados para o sistema
+app.get('/api/dados', async (req, res) => {
     try {
-        const itemExistente = await Estoque.findOne({ 
-            where: { codigo_identificador: codigo, empresa_id: empresa_id } 
-        });
+        const itens = await Produto.findAll({ order: [['nome', 'ASC']] });
+        const historico = await Movimentacao.findAll({ order: [['data', 'DESC']], limit: 20 });
+        res.json({ itens, historico });
+    } catch (err) { res.status(500).json(err); }
+});
 
-        if (itemExistente) {
-            await itemExistente.increment('quantidade', { by: quantidadeAdicional });
-            return res.json({ ok: true, msg: "Quantidade atualizada" });
+// 2. Adicionar ou Incrementar item
+app.post('/api/estoque/add', async (req, res) => {
+    const { codigo, nome, qtd, tipo } = req.body;
+    try {
+        let produto = await Produto.findOne({ where: { codigo } });
+        if (produto) {
+            await produto.increment('quantidade', { by: parseInt(qtd) });
+            res.json(await produto.reload());
         } else {
-            await Estoque.create({
-                empresa_id, nome, tipo, codigo_identificador: codigo, quantidade: quantidadeAdicional
-            });
-            return res.json({ ok: true, msg: "Novo item cadastrado" });
+            const novo = await Produto.create({ codigo, nome, quantidade: parseInt(qtd), tipo });
+            res.status(201).json(novo);
         }
-    } catch (err) {
-        res.status(500).json({ error: "Erro interno no servidor" });
-    }
+    } catch (err) { res.status(500).json(err); }
 });
 
-app.post('/api/estoque/retirar', auth, async (req, res) => {
-    const { id, qtd } = req.body;
-    const valorRetirada = parseInt(qtd);
-    if (!valorRetirada || valorRetirada <= 0) return res.status(400).json({ error: "Quantidade inválida" });
+// 3. Registrar Retirada (Baixa com Responsável)
+app.post('/api/estoque/retirar', async (req, res) => {
+    const { id, qtd, equipe, responsavel } = req.body;
+    try {
+        const produto = await Produto.findByPk(id);
+        if (!produto || produto.quantidade < qtd) return res.status(400).json({ error: 'Estoque insuficiente' });
 
-    const item = await Estoque.findOne({ where: { id, empresa_id: req.session.user.empresa_id } });
-    if (item && item.quantidade >= valorRetirada) {
-        await item.decrement('quantidade', { by: valorRetirada });
-        res.json({ ok: true });
-    } else {
-        res.status(400).json({ error: "Saldo insuficiente" });
-    }
+        await produto.decrement('quantidade', { by: parseInt(qtd) });
+        await Movimentacao.create({ item_nome: produto.nome, quantidade: parseInt(qtd), equipe, responsavel });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json(err); }
 });
 
-app.post('/api/estoque/status', auth, async (req, res) => {
-    await Estoque.update({ status: req.body.status }, { where: { id: req.body.id, empresa_id: req.session.user.empresa_id } });
-    res.json({ ok: true });
+// 4. Alterar Status de Manutenção
+app.post('/api/estoque/status', async (req, res) => {
+    const { id, status } = req.body;
+    try {
+        await Produto.update({ status }, { where: { id } });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json(err); }
 });
 
-app.post('/api/estoque/delete', auth, async (req, res) => {
-    await Estoque.destroy({ where: { id: req.body.id, empresa_id: req.session.user.empresa_id } });
-    res.json({ ok: true });
-});
-
-app.post('/api/assinar', auth, async (req, res) => {
-    await Usuario.update({ assinatura_ativa: 1 }, { where: { id: req.session.user.id } });
-    req.session.user.assinatura_ativa = 1;
-    res.json({ ok: true });
-});
-
-// --- UI ENGINE (CSS/HTML) ---
+// --- INTERFACE (UI) ---
 const ui_styles = `
 <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
@@ -142,149 +88,88 @@ const ui_styles = `
     aside { width: 260px; background: #0a0d12; border-right: 1px solid #1e293b; display:flex; flex-direction:column; padding: 20px; }
     .nav-btn { padding: 14px; cursor: pointer; color: var(--sub); border-radius: 12px; margin-bottom: 8px; transition: 0.2s; display:flex; align-items:center; gap:12px; font-weight: 500; }
     .nav-btn:hover, .nav-btn.active { background: #111827; color: var(--accent); }
-    main { flex:1; padding: 40px; overflow-y:auto; }
-    .stats-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+    main { flex:1; padding: 40px; overflow-y:auto; background: radial-gradient(circle at top right, #0f172a, #05070a); }
+    .stats-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 30px; }
     .stat-card { background: var(--card); padding: 25px; border-radius: 16px; border: 1px solid #1e293b; transition: 0.3s; }
+    .stat-card:hover { border-color: var(--accent); }
     .table-container { background: var(--card); border-radius: 16px; padding: 10px; border: 1px solid #1e293b; }
     table { width: 100%; border-collapse: collapse; }
-    th { text-align:left; color: var(--sub); padding: 15px; font-size: 12px; text-transform: uppercase; border-bottom: 1px solid #1e293b; }
+    th { text-align:left; color: var(--sub); padding: 15px; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #1e293b; }
     td { padding: 15px; border-bottom: 1px solid #111827; font-size: 14px; }
-    .btn-main { background: var(--accent); color: black; font-weight: 700; padding: 12px 24px; border:none; border-radius:10px; cursor:pointer; }
-    .btn-outline { background:none; border:1px solid #1e293b; color:white; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:12px; }
-    .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); justify-content:center; align-items:center; z-index:100; backdrop-filter: blur(5px); }
-    input, select { background: #111827; border: 1px solid #1e293b; color: white; padding: 12px; border-radius: 10px; margin: 8px 0; width: 100%; }
-    .badge { padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
-    .badge-blue { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
-    .badge-red { background: rgba(248, 113, 113, 0.2); color: var(--danger); }
+    .btn-main { background: var(--accent); color: black; font-weight: 700; padding: 12px 20px; border:none; border-radius:10px; cursor:pointer; }
+    .btn-outline { background:none; border:1px solid #1e293b; color:white; padding:6px 12px; border-radius:8px; cursor:pointer; }
+    .btn-outline:hover { background: #1e293b; }
+    .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); justify-content:center; align-items:center; z-index:100; backdrop-filter: blur(8px); }
+    input, select { background: #111827; border: 1px solid #1e293b; color: white; padding: 12px; border-radius: 10px; margin: 8px 0; width: 100%; box-sizing: border-box; }
+    .badge { padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: bold; }
+    .badge-success { background: #064e3b; color: #34d399; }
+    .badge-danger { background: #7f1d1d; color: #f87171; }
 </style>
 `;
 
-// ... (Aqui ficariam as rotas app.get('/login'), app.get('/dashboard') e os scripts JS que você já tem) ...
-// (Mantive oculto para focar na parte de conexão abaixo)
-
-app.get('/login', (req, res) => {
-    res.send(`${ui_styles}<div style="display:flex; justify-content:center; align-items:center; height:100vh">
-        <div class="stat-card" style="width:360px">
-            <h1 style="text-align:center; margin-bottom:5px">Aura <span style="color:var(--accent)">OS</span></h1>
-            <p style="text-align:center; color:var(--sub); font-size:14px; margin-bottom:30px">Enterprise Resource Planning</p>
-            <form action="/api/login" method="POST">
-                <input name="login" placeholder="E-mail Corporativo" required>
-                <input name="senha" type="password" placeholder="Senha" required>
-                <button class="btn-main" style="width:100%; margin-top:15px">ACESSAR PAINEL</button>
-            </form>
-            <p style="text-align:center; font-size:13px; color:var(--sub); margin-top:20px; cursor:pointer" onclick="document.getElementById('reg').style.display='block'">Registrar nova empresa</p>
-            <div id="reg" style="display:none; margin-top:15px; border-top: 1px solid #1e293b; padding-top:15px">
-                <form action="/api/cadastro" method="POST">
-                    <input name="nome" placeholder="Nome Completo">
-                    <input name="login" placeholder="E-mail">
-                    <input name="senha" type="password" placeholder="Senha">
-                    <button class="btn-main" style="width:100%; background:white; color:black">CRIAR CONTA</button>
-                </form>
-            </div>
-        </div>
-    </div>`);
-});
-
-app.get('/assinatura', auth, (req, res) => {
-    res.send(`${ui_styles}<div style="display:flex; justify-content:center; align-items:center; height:100vh">
-        <div class="stat-card" style="text-align:center; max-width:400px">
-            <h2 style="color:var(--accent)">Ativação Necessária</h2>
-            <p style="color:var(--sub)">Sua empresa foi detectada no cluster <b>uCore</b>. Ative o dashboard para sincronizar os ativos de rede e estoque.</p>
-            <button class="btn-main" style="width:100%; margin-top:20px" onclick="fetch('/api/assinar',{method:'POST'}).then(()=>location.href='/')">ATIVAR AURA OS</button>
-        </div>
-    </div>`);
-});
-
-app.get('/', auth, (req, res) => {
+app.get('/', (req, res) => {
     res.send(`${ui_styles}
     <aside>
-        <div style="margin-bottom:40px; padding-left:10px">
-            <h2 style="margin:0">Aura <span style="color:var(--accent)">OS</span></h2>
-            <small style="color:var(--sub); text-transform:uppercase; font-size:10px; letter-spacing:1px">uCore Cloud Computing</small>
-        </div>
-        <div class="nav-btn active" onclick="changeTab('dash', this)"><span>📊</span> Dashboard</div>
-        <div class="nav-btn" onclick="changeTab('equip', this)"><span>📦</span> Inventário</div>
-        <div class="nav-btn" onclick="changeTab('manu', this)"><span>🔧</span> Manutenção</div>
-        <div class="nav-btn" style="margin-top:auto" onclick="location.href='/logout'"><span>🚪</span> Encerrar Sessão</div>
+        <div style="margin-bottom:40px"><h2>Aura <span style="color:var(--accent)">OS</span></h2></div>
+        <div class="nav-btn active" onclick="changeTab('dash', this)">📊 Dashboard</div>
+        <div class="nav-btn" onclick="changeTab('equip', this)">📦 Inventário</div>
+        <div class="nav-btn" onclick="changeTab('hist', this)">📜 Histórico</div>
+        <div class="nav-btn" onclick="changeTab('manu', this)">🛠️ Manutenção</div>
     </aside>
     <main id="view"></main>
 
+    <!-- Modal Adicionar -->
     <div id="modalAdd" class="modal">
         <div class="stat-card" style="width:400px">
-            <h3 style="margin-top:0">Novo Registro de Ativo</h3>
-            <label style="font-size:12px; color:var(--sub)">Nome do Item</label>
-            <input id="inNome" placeholder="Ex: MacBook Pro M2">
-            <label style="font-size:12px; color:var(--sub)">Categoria</label>
-            <select id="inTipo">
-                <option value="Alugado">Alugado (Ativo Permanente)</option>
-                <option value="Comprado">Comprado (Consumível)</option>
-            </select>
-            <label style="font-size:12px; color:var(--sub)">ID / SKU</label>
-            <input id="inCod" placeholder="Ex: AUR-9920">
-            <label style="font-size:12px; color:var(--sub)">Quantidade Inicial</label>
-            <input id="inQtd" type="number" value="1">
-            <button class="btn-main" style="width:100%; margin-top:10px" onclick="saveItem()">CONFIRMAR CADASTRO</button>
-            <button onclick="document.getElementById('modalAdd').style.display='none'" style="width:100%; background:none; border:none; color:var(--sub); margin-top:15px; cursor:pointer">Voltar</button>
+            <h3>Novo Cadastro</h3>
+            <input id="inNome" placeholder="Nome do Equipamento/Material">
+            <select id="inTipo"><option value="Alugado">Alugado (Permanente)</option><option value="Comprado">Comprado (Consumível)</option></select>
+            <input id="inCod" placeholder="Código ou Patrimônio">
+            <input id="inQtd" type="number" value="1" placeholder="Quantidade">
+            <button class="btn-main" style="width:100%" onclick="saveItem()">SALVAR NO SISTEMA</button>
+            <button class="btn-outline" style="width:100%; margin-top:10px; border:none" onclick="closeM('modalAdd')">CANCELAR</button>
+        </div>
+    </div>
+
+    <!-- Modal Retirada -->
+    <div id="modalRetirar" class="modal">
+        <div class="stat-card" style="width:400px">
+            <h3 id="retTitle">Baixa de Material</h3>
+            <input id="retID" type="hidden">
+            <input id="retQtd" type="number" placeholder="Quantidade para retirar">
+            <input id="retEquipe" placeholder="Equipe (Ex: Sialdrill)">
+            <input id="retResp" placeholder="Nome do Responsável">
+            <button class="btn-main" style="width:100%" onclick="confirmarRetirada()">CONFIRMAR RETIRADA</button>
+            <button class="btn-outline" style="width:100%; margin-top:10px; border:none" onclick="closeM('modalRetirar')">CANCELAR</button>
         </div>
     </div>
 
     <script>
-        let currentData = [];
+        let currentData = { itens: [], historico: [] };
+        
         async function refresh() {
             const res = await fetch('/api/dados');
             currentData = await res.json();
-            const activeTab = document.querySelector('.nav-btn.active').innerText;
-            if(activeTab.includes('Dashboard')) renderDash();
-            else if(activeTab.includes('Inventário')) renderEquip();
-            else if(activeTab.includes('Manutenção')) renderManu();
+            renderCurrentTab();
         }
+
+        function closeM(id) { document.getElementById(id).style.display='none'; }
+
+        function renderCurrentTab() {
+            const active = document.querySelector('.nav-btn.active').innerText;
+            if(active.includes('Dashboard')) renderDash();
+            else if(active.includes('Inventário')) renderEquip();
+            else if(active.includes('Histórico')) renderHist();
+            else if(active.includes('Manutenção')) renderManu();
+        }
+
         function changeTab(tab, el) {
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
             el.classList.add('active');
-            if(tab === 'dash') renderDash();
-            if(tab === 'equip') renderEquip();
-            if(tab === 'manu') renderManu();
+            refresh();
         }
-        function renderDash() {
-            const alug = currentData.filter(i => i.tipo === 'Alugado').length;
-            const comp = currentData.filter(i => i.tipo === 'Comprado').reduce((a,b)=> a+b.quantidade, 0);
-            const manu = currentData.filter(i => i.status === 'Manutenção').length;
-            document.getElementById('view').innerHTML = \`
-                <h1 style="margin-top:0">Visão Geral</h1>
-                <div class="stats-grid">
-                    <div class="stat-card"><small>ATIVOS PERMANENTES</small><h2>\${alug}</h2></div>
-                    <div class="stat-card"><small>SKUs EM ESTOQUE</small><h2>\${comp}</h2></div>
-                    <div class="stat-card"><small>EM MANUTENÇÃO</small><h2 style="color:var(--danger)">\${manu}</h2></div>
-                </div>
-                <div class="table-container">
-                    <table>
-                        <tr><th>ID</th><th>Ativo</th><th>Status</th></tr>
-                        \${currentData.slice(-5).reverse().map(i => \`<tr>
-                            <td><span class="badge badge-blue">#\${i.codigo_identificador}</span></td>
-                            <td>\${i.nome}</td>
-                            <td>\${i.status}</td>
-                        </tr>\`).join('')}
-                    </table>
-                </div>\`;
-        }
-        function renderEquip() {
-            document.getElementById('view').innerHTML = \`
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px">
-                    <h1>Inventário</h1>
-                    <button class="btn-main" onclick="document.getElementById('modalAdd').style.display='flex'">+ NOVO ITEM</button>
-                </div>
-                <div class="table-container">
-                    <table>
-                        <tr><th>ID / SKU</th><th>Item</th><th>Qtd / Status</th><th>Ações</th></tr>
-                        \${currentData.map(i => \`<tr>
-                            <td>\${i.codigo_identificador}</td>
-                            <td>\${i.nome}</td>
-                            <td>\${i.tipo === 'Alugado' ? i.status : i.quantidade}</td>
-                            <td><button class="btn-outline" onclick="deleteItem('\${i.id}')">Excluir</button></td>
-                        </tr>\`).join('')}
-                    </table>
-                </div>\`;
-        }
+
+        // Funções de Ação
         async function saveItem() {
             const body = { 
                 nome: document.getElementById('inNome').value, 
@@ -293,38 +178,119 @@ app.get('/', auth, (req, res) => {
                 qtd: document.getElementById('inQtd').value 
             };
             await fetch('/api/estoque/add', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-            document.getElementById('modalAdd').style.display='none';
+            closeM('modalAdd');
             refresh();
         }
-        async function deleteItem(id) {
-            if(confirm("Excluir?")) {
-                await fetch('/api/estoque/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id}) });
-                refresh();
-            }
+
+        function openRetirada(id, nome) {
+            document.getElementById('retID').value = id;
+            document.getElementById('retTitle').innerText = "Retirar: " + nome;
+            document.getElementById('modalRetirar').style.display = 'flex';
         }
+
+        async function confirmarRetirada() {
+            const body = { 
+                id: document.getElementById('retID').value, 
+                qtd: document.getElementById('retQtd').value, 
+                equipe: document.getElementById('retEquipe').value, 
+                responsavel: document.getElementById('retResp').value 
+            };
+            const res = await fetch('/api/estoque/retirar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+            if(!res.ok) alert("Erro: Estoque insuficiente!");
+            closeM('modalRetirar');
+            refresh();
+        }
+
+        async function toggleManutencao(id, statusAtual) {
+            const novoStatus = statusAtual === 'Disponível' ? 'Manutenção' : 'Disponível';
+            await fetch('/api/estoque/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, status: novoStatus}) });
+            refresh();
+        }
+
+        // Renderização de Telas
+        function renderDash() {
+            const alug = currentData.itens.filter(i => i.tipo === 'Alugado').length;
+            const comp = currentData.itens.filter(i => i.tipo === 'Comprado').reduce((a,b)=> a + b.quantidade, 0);
+            const manu = currentData.itens.filter(i => i.status === 'Manutenção').length;
+
+            document.getElementById('view').innerHTML = \`
+                <h1>Dashboard Central</h1>
+                <div class="stats-grid">
+                    <div class="stat-card"><small>EQUIPAMENTOS ATIVOS</small><h2 style="color:var(--accent)">\${alug}</h2></div>
+                    <div class="stat-card"><small>ITENS EM ESTOQUE</small><h2>\${comp}</h2></div>
+                    <div class="stat-card"><small>EM MANUTENÇÃO</small><h2 style="color:var(--danger)">\${manu}</h2></div>
+                </div>
+                <h3>Últimas Movimentações</h3>
+                <div class="table-container">
+                    <table>
+                        \${currentData.historico.slice(0,5).map(h => \`<tr><td>\${h.responsavel} retirou \${h.quantidade}x \${h.item_nome}</td><td style="text-align:right; color:var(--sub)">\${new Date(h.data).toLocaleDateString()}</td></tr>\`).join('')}
+                    </table>
+                </div>\`;
+        }
+
+        function renderEquip() {
+            document.getElementById('view').innerHTML = \`
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px">
+                    <h1>Inventário Geral</h1>
+                    <button class="btn-main" onclick="document.getElementById('modalAdd').style.display='flex'">+ NOVO ITEM</button>
+                </div>
+                <div class="table-container">
+                    <table>
+                        <tr><th>Cód</th><th>Item</th><th>Tipo</th><th>Qtd</th><th>Ação</th></tr>
+                        \${currentData.itens.map(i => \`<tr>
+                            <td>#\${i.codigo}</td>
+                            <td>\${i.nome}</td>
+                            <td><span class="badge" style="background:#1e293b">\${i.tipo}</span></td>
+                            <td>\${i.quantidade}</td>
+                            <td><button class="btn-outline" onclick="openRetirada('\${i.id}', '\${i.nome}')">Baixa</button></td>
+                        </tr>\`).join('')}
+                    </table>
+                </div>\`;
+        }
+
+        function renderHist() {
+            document.getElementById('view').innerHTML = \`
+                <h1>Histórico de Saídas</h1>
+                <div class="table-container">
+                    <table>
+                        <tr><th>Data</th><th>Responsável</th><th>Item</th><th>Qtd</th><th>Equipe</th></tr>
+                        \${currentData.historico.map(h => \`<tr>
+                            <td>\${new Date(h.data).toLocaleDateString()}</td>
+                            <td style="color:var(--accent); font-weight:bold">\${h.responsavel}</td>
+                            <td>\${h.item_nome}</td>
+                            <td>\${h.quantidade}</td>
+                            <td>\${h.equipe}</td>
+                        </tr>\`).join('')}
+                    </table>
+                </div>\`;
+        }
+
+        function renderManu() {
+            const alugados = currentData.itens.filter(i => i.tipo === 'Alugado');
+            document.getElementById('view').innerHTML = \`
+                <h1>Controle de Manutenção</h1>
+                <div class="table-container">
+                    <table>
+                        <tr><th>Patrimônio</th><th>Equipamento</th><th>Status</th><th>Ação</th></tr>
+                        \${alugados.map(i => \`<tr>
+                            <td>#\${i.codigo}</td>
+                            <td>\${i.nome}</td>
+                            <td><span class="badge \${i.status === 'Disponível' ? 'badge-success' : 'badge-danger'}">\${i.status}</span></td>
+                            <td>
+                                <button class="btn-outline" onclick="toggleManutencao('\${i.id}', '\${i.status}')">
+                                    \${i.status === 'Disponível' ? '🛠️ Enviar p/ Reparo' : '✅ Finalizar'}
+                                </button>
+                            </td>
+                        </tr>\`).join('')}
+                    </table>
+                </div>\`;
+        }
+
         refresh();
     </script>`);
 });
 
-app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login'); });
-
-// --- MUDANÇA CRÍTICA PARA O RENDER ABAIXO ---
-
-async function startServer() {
-    try {
-        await sequelize.authenticate();
-        console.log('✅ Conectado ao Neon PostgreSQL');
-        await sequelize.sync(); 
-        
-        // No Render, a porta deve ser dinâmica via process.env.PORT
-        // Se não houver, usa a 3000 (local). O host deve ser '0.0.0.0'.
-        const PORT = process.env.PORT || 3000;
-        app.listen(PORT, '0.0.0.0', () => {
-            console.log(`🚀 Aura OS voando na porta ${PORT}`);
-        });
-    } catch (err) {
-        console.error('❌ Erro ao iniciar servidor:', err);
-    }
-}
-
-startServer();
+const PORT = process.env.PORT || 3000;
+sequelize.sync().then(() => {
+    app.listen(PORT, () => console.log('🚀 Aura OS: Sistema Completo Online'));
+});
