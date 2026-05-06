@@ -4,17 +4,21 @@ const { Sequelize, DataTypes } = require('sequelize');
 const session = require('express-session');
 const app = express();
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (NEON / POSTGRESQL) ---
-const sequelize = new Sequelize(process.env.DATABASE_URL, {
-    dialect: 'postgres',
-    dialectOptions: {
-        ssl: {
-            require: true,
-            rejectUnauthorized: false
-        }
-    },
-    logging: false
-});
+
+async function startServer() {
+    try {
+        await sequelize.authenticate();
+        console.log('✅ Conectado ao Neon PostgreSQL');
+        await sequelize.sync(); // Cria as tabelas se não existirem
+        
+        const PORT = process.env.PORT || 3000;
+        app.listen(PORT, '0.0.0.0', () => console.log(`Rodando em http://0.0.0.0:${PORT}`));
+    } catch (err) {
+        console.error('❌ Erro crítico na inicialização:', err);
+    }
+}
+
+startServer();
 
 // --- MODELOS ---
 const Empresa = sequelize.define('Empresa', {
@@ -397,4 +401,5 @@ app.get('/', auth, (req, res) => {
 
 app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login'); });
 
-app.listen(3000, () => console.log('Aura OS Enterprise [NEON MODE]: http://localhost:3000'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Aura OS rodando na porta ${PORT}`));
